@@ -14,6 +14,7 @@
 //            keys ss sls sb sfa sgs sas sgpe srcd sms bh; ss = 4, sls = lock state (0 unlocked; 3 would be "no passcode").
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/IOLib.h>   // H328: PE_parse_boot_argn for the sheng-aks gate
 extern "C" void native_keyevents_open_refused(void);
 extern "C" bool native_aks_state_enabled(void);
 extern "C" uint32_t native_aks_lock_state(void);
@@ -160,3 +161,41 @@ public:
 };
 OSDefineMetaClassAndStructors(AppleKeyStore, IOService)
 extern "C" IOService *native_keyevents_allocate(void) { return new AppleKeyStore; }
+
+// H328: the hooks this driver was written against live in a kernel patch that this port never
+// carried, so it was dead code: not in the archive list, nothing instantiated it, and the
+// accessors it calls were undefined.  They are implemented here instead, and the boot argument
+// sheng-aks=1 turns the state answers on.  Nothing here stores or protects a key.
+extern "C" bool
+native_aks_state_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        int value = 0;
+        enabled = PE_parse_boot_argn("sheng-aks", &value, sizeof value) && value ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+extern "C" uint32_t
+native_aks_lock_state(void)
+{
+    return (uint32_t)(kUnlockedSinceBoot);   /* unlocked since boot, no passcode */
+}
+
+extern "C" void
+native_aks_call(uint32_t selector, int32_t result)
+{
+    (void)selector;
+    (void)result;
+}
+
+extern "C" void
+native_aks_opened(void)
+{
+}
+
+extern "C" void
+native_keyevents_open_refused(void)
+{
+}
