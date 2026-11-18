@@ -10,6 +10,11 @@ import tempfile
 root = Path(__file__).resolve().parent
 with tempfile.TemporaryDirectory() as directory:
     work = Path(directory)
+    source = (root / "NativeKeyStoreEvents.cpp").read_text(encoding="utf-8")
+    provider, marker, _ = source.partition("\n// H328:")
+    if not marker:
+        raise SystemExit("H328 hook boundary not found")
+    (work / "NativeKeyStoreEvents.inc").write_text(provider, encoding="utf-8")
     (work / "IOKit").mkdir()
     (work / "IOKit/IOService.h").write_text(r'''
 #pragma once
@@ -75,13 +80,15 @@ public:
 #include <string>
 static bool enabled;
 static unsigned refused, opened, calls;
+static unsigned opens;
 static uint32_t lockState;
 extern "C" bool native_aks_state_enabled() { return enabled; }
 extern "C" uint32_t native_aks_lock_state() { return lockState; }
 extern "C" void native_keyevents_open_refused() { ++refused; }
 extern "C" void native_aks_opened() { ++opened; }
 extern "C" void native_aks_call(uint32_t, int32_t) { ++calls; }
-#include "NativeKeyStoreEvents.cpp"
+extern "C" void native_aks_open_result(UInt32, int32_t) { ++opens; }
+#include "NativeKeyStoreEvents.inc"
 
 // The decoder libaks uses (_der_dict_iterate/_der_get_number): SET { SEQUENCE { UTF8String key, INTEGER } ... }.
 static bool decode(const uint8_t *p, size_t n, std::map<std::string, int64_t> &out) {
@@ -121,12 +128,12 @@ int main() {
         assert(base->newUserClient(nullptr, nullptr, type, &out) == kIOReturnNotReady && !out);
         assert(base->newUserClient(nullptr, nullptr, type, nullptr, nullptr) == kIOReturnNotReady);
     }
-    assert(refused == 12 && !opened);
+    assert(refused == 12 && !opened && opens == 12);
     // State mode: the client opens and answers only the state queries.
     enabled = true;
     IOUserClient *client = nullptr;
     assert(base->newUserClient(nullptr, nullptr, 0, nullptr, &client) == kIOReturnSuccess && client && client->started);
-    assert(opened == 1);
+    assert(opened == 1 && opens == 13);
     uint64_t in[1] = {0}, outScalar[1] = {0};
     IOExternalMethodArguments a{in, 1, outScalar, 1, nullptr, 0};
     assert(client->externalMethod(7, &a) == kIOReturnSuccess && outScalar[0] == 4);
