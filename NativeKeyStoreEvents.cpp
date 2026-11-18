@@ -20,6 +20,8 @@ extern "C" bool native_aks_state_enabled(void);
 extern "C" uint32_t native_aks_lock_state(void);
 extern "C" void native_aks_call(uint32_t selector, int32_t result);
 extern "C" void native_aks_opened(void);
+extern "C" void native_aks_open_result(UInt32 type, int32_t result);
+extern "C" void proc_selfname(char *, int);
 
 namespace {
 constexpr uint32_t kSelLockState = 7, kSelGetSystem = 14, kSelDeviceState = 17, kSelExtendedDeviceState = 35;
@@ -28,6 +30,19 @@ constexpr uint32_t kStateFlags = 4;
 constexpr uint64_t kSystemHandle = 0;
 constexpr IOReturn kAksError = (IOReturn)0xe00002bc;   // what libaks reports itself when the connection is missing
 constexpr IOReturn kAksUnsupported = (IOReturn)0xe00002c7;
+constexpr unsigned kAksProbeSlots = 128;
+
+struct AksProbeStat {
+    uint32_t calls;
+    uint32_t errors;
+    uint32_t lastResult;
+    uint32_t logged;
+};
+static AksProbeStat gAksProbe[kAksProbeSlots];
+static uint32_t gAksOpenCalls;
+static uint32_t gAksOpenErrors;
+static uint32_t gAksOpenLastResult;
+static uint32_t gAksOpenLogged;
 
 struct DerWriter {
     uint8_t *p; size_t cap, n = 0; bool ok = true;
@@ -129,16 +144,29 @@ class AppleKeyStore final : public IOService {
     OSDeclareDefaultStructors(AppleKeyStore)
     IOReturn open(task_t task, void *security, UInt32 type, OSDictionary *properties, IOUserClient **out) {
         if (out) *out = nullptr;
-        if (!native_aks_state_enabled() || !out) { native_keyevents_open_refused(); return kIOReturnNotReady; }
-        AppleKeyStoreUserClient *client = new AppleKeyStoreUserClient;
-        if (!client) return kIOReturnNoMemory;
-        if (!client->initWithTask(task, security, type, properties) || !client->attach(this)) {
-            client->release(); return kIOReturnError;
+        IOReturn result;
+        if (!native_aks_state_enabled() || !out) {
+            native_keyevents_open_refused();
+            result = kIOReturnNotReady;
+        } else {
+            AppleKeyStoreUserClient *client = new AppleKeyStoreUserClient;
+            if (!client) {
+                result = kIOReturnNoMemory;
+            } else if (!client->initWithTask(task, security, type, properties) || !client->attach(this)) {
+                client->release();
+                result = kIOReturnError;
+            } else if (!client->start(this)) {
+                client->detach(this);
+                client->release();
+                result = kIOReturnError;
+            } else {
+                native_aks_opened();
+                *out = client;
+                result = kIOReturnSuccess;
+            }
         }
-        if (!client->start(this)) { client->detach(this); client->release(); return kIOReturnError; }
-        native_aks_opened();
-        *out = client;
-        return kIOReturnSuccess;
+        native_aks_open_result(type, (int32_t)result);
+        return result;
     }
 public:
     bool start(IOService *provider) override {
@@ -173,6 +201,7 @@ native_aks_state_enabled(void)
     if (enabled < 0) {
         int value = 0;
         enabled = PE_parse_boot_argn("sheng-aks", &value, sizeof value) && value ? 1 : 0;
+        IOLog("NATIVE_AKS_PROBE: gate sheng-aks=%d\n", enabled);
     }
     return enabled != 0;
 }
@@ -186,8 +215,45 @@ native_aks_lock_state(void)
 extern "C" void
 native_aks_call(uint32_t selector, int32_t result)
 {
-    (void)selector;
-    (void)result;
+    const unsigned slot = selector < kAksProbeSlots ? selector : kAksProbeSlots - 1;
+    AksProbeStat *stat = &gAksProbe[slot];
+    const uint32_t calls = __atomic_add_fetch(&stat->calls, 1, __ATOMIC_RELAXED);
+    if (result != 0) {
+        __atomic_add_fetch(&stat->errors, 1, __ATOMIC_RELAXED);
+    }
+    const uint32_t last = __atomic_load_n(&stat->lastResult, __ATOMIC_RELAXED);
+    if ((calls == 1 || (uint32_t)result != last) &&
+        __atomic_load_n(&stat->logged, __ATOMIC_RELAXED) < 8) {
+        __atomic_add_fetch(&stat->logged, 1, __ATOMIC_RELAXED);
+        char comm[17] = {};
+        proc_selfname(comm, sizeof comm);
+        IOLog("NATIVE_AKS_PROBE: call comm=%s sel=%u rc=0x%x calls=%u errors=%u\n",
+              comm, selector, (uint32_t)result,
+              __atomic_load_n(&stat->calls, __ATOMIC_RELAXED),
+              __atomic_load_n(&stat->errors, __ATOMIC_RELAXED));
+    }
+    __atomic_store_n(&stat->lastResult, (uint32_t)result, __ATOMIC_RELAXED);
+}
+
+extern "C" void
+native_aks_open_result(UInt32 type, int32_t result)
+{
+    const uint32_t calls = __atomic_add_fetch(&gAksOpenCalls, 1, __ATOMIC_RELAXED);
+    if (result != 0) {
+        __atomic_add_fetch(&gAksOpenErrors, 1, __ATOMIC_RELAXED);
+    }
+    const uint32_t last = __atomic_load_n(&gAksOpenLastResult, __ATOMIC_RELAXED);
+    if ((calls <= 16 || (uint32_t)result != last) &&
+        __atomic_load_n(&gAksOpenLogged, __ATOMIC_RELAXED) < 32) {
+        __atomic_add_fetch(&gAksOpenLogged, 1, __ATOMIC_RELAXED);
+        char comm[17] = {};
+        proc_selfname(comm, sizeof comm);
+        IOLog("NATIVE_AKS_PROBE: open comm=%s type=%u rc=0x%x calls=%u errors=%u\n",
+              comm, type, (uint32_t)result,
+              __atomic_load_n(&gAksOpenCalls, __ATOMIC_RELAXED),
+              __atomic_load_n(&gAksOpenErrors, __ATOMIC_RELAXED));
+    }
+    __atomic_store_n(&gAksOpenLastResult, (uint32_t)result, __ATOMIC_RELAXED);
 }
 
 extern "C" void
