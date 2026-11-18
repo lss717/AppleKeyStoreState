@@ -72,6 +72,7 @@ public:
 };
 ''')
     (work / "IOKit/IOUserClient.h").write_text("#pragma once\n#include <IOKit/IOService.h>\n")
+    (work / "IOKit/IOLib.h").write_text("#pragma once\n#include <cstdint>\n")
     (work / "test.cpp").write_text(r'''
 #include <cassert>
 #include <cstring>
@@ -87,7 +88,7 @@ extern "C" uint32_t native_aks_lock_state() { return lockState; }
 extern "C" void native_keyevents_open_refused() { ++refused; }
 extern "C" void native_aks_opened() { ++opened; }
 extern "C" void native_aks_call(uint32_t, int32_t) { ++calls; }
-extern "C" void native_aks_open_result(UInt32, int32_t) { ++opens; }
+extern "C" void native_aks_open_result(uint32_t, int32_t) { ++opens; }
 #include "NativeKeyStoreEvents.inc"
 
 // The decoder libaks uses (_der_dict_iterate/_der_get_number): SET { SEQUENCE { UTF8String key, INTEGER } ... }.
